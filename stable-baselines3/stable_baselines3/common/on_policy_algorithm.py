@@ -81,6 +81,8 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         device: Union[th.device, str] = "auto",
         _init_setup_model: bool = True,
         supported_action_spaces: Optional[Tuple[Type[spaces.Space], ...]] = None,
+        ppo_mode: str = "opt",
+        switch_to_ent_prob: float = 0.005,
     ):
         super().__init__(
             policy=policy,
@@ -106,6 +108,12 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         self.max_grad_norm = max_grad_norm
         self.rollout_buffer_class = rollout_buffer_class
         self.rollout_buffer_kwargs = rollout_buffer_kwargs or {}
+
+        # setup for entropy investigation for ppo
+        self.ppo_mode = ppo_mode
+        self.switch_to_ent_prob = switch_to_ent_prob
+        if self.ppo_mode == "noent":
+            self.ent_coef = 0.0
 
         if _init_setup_model:
             self._setup_model()
@@ -135,6 +143,20 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         )
         self.policy = self.policy.to(self.device)
 
+        # make a second policy for double backup stuff (only used when ppo_mode in ["dbl", "dbltrn"])
+        self.ent_policy = self.policy_class(  # type: ignore[assignment]
+            self.observation_space, self.action_space, self.lr_schedule, use_sde=self.use_sde, **self.policy_kwargs
+        )
+        self.ent_policy = self.ent_policy.to(self.device)
+
+        # if ppo_mode in ["noent", "opt"] then running ppo ignoring ent_policy
+        # if ppo_mode == "dbl", then rollouts will use ent_policy
+        # if ppo_mode == "dbltrn" then rollouts will use mixture of policy and ent_policy (starting with non ent policy)
+        self.follow_ent_policy = np.zeros((self.env.num_envs,1), dtype=np.int8)
+        if self.ppo_mode == "dbl":
+            self.follow_ent_policy = np.ones((self.env.num_envs,1), dtype=np.int8)
+
+
     def collect_rollouts(
         self,
         env: VecEnv,
@@ -158,12 +180,14 @@ class OnPolicyAlgorithm(BaseAlgorithm):
         assert self._last_obs is not None, "No previous observation was provided"
         # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
+        self.ent_policy.set_training_mode(False)
 
         n_steps = 0
         rollout_buffer.reset()
         # Sample new weights for the state dependent exploration
         if self.use_sde:
             self.policy.reset_noise(env.num_envs)
+            self.ent_policy.reset_noise(env.num_envs)
 
         callback.on_rollout_start()
 
@@ -171,27 +195,47 @@ class OnPolicyAlgorithm(BaseAlgorithm):
             if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
                 # Sample a new noise matrix
                 self.policy.reset_noise(env.num_envs)
+                self.ent_policy.reset_noise(env.num_envs)
 
             with th.no_grad():
                 # Convert to pytorch tensor or to TensorDict
                 obs_tensor = obs_as_tensor(self._last_obs, self.device)
                 actions, values, log_probs = self.policy(obs_tensor)
+                ent_actions, ent_values, ent_log_probs = self.ent_policy(obs_tensor)
             actions = actions.cpu().numpy()
+            ent_actions = ent_actions.cpu().numpy()
 
             # Rescale and perform action
             clipped_actions = actions
+            clipped_ent_actions = ent_actions
 
             if isinstance(self.action_space, spaces.Box):
                 if self.policy.squash_output:
                     # Unscale the actions to match env bounds
                     # if they were previously squashed (scaled in [-1, 1])
                     clipped_actions = self.policy.unscale_action(clipped_actions)
+                    clipped_ent_actions = self.ent_policy.unscale_action(clipped_ent_actions)
                 else:
                     # Otherwise, clip the actions to avoid out of bound error
                     # as we are sampling from an unbounded Gaussian distribution
                     clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+                    clipped_ent_actions = np.clip(ent_actions, self.action_space.low, self.action_space.high)
+            
+            # Update what policy to use this timestep if ppo_mode == "dbltrn"
+            if self.ppo_mode == "dbltrn":
+                self.follow_ent_policy |= np.random.binomial(1, self.switch_to_ent_prob, (self.env.num_envs,1))
 
-            new_obs, rewards, dones, infos = env.step(clipped_actions)
+            # actions, values and log probs to be stored in rollout buf
+            follow_ent_policy_tensor = th.from_numpy(self.follow_ent_policy)
+            follow_ent_policy_tensor = follow_ent_policy_tensor.to(self.device)
+            buf_actions = (1-self.follow_ent_policy) * actions + self.follow_ent_policy * ent_actions
+            buf_values = (1-follow_ent_policy_tensor) * values + follow_ent_policy_tensor * ent_values
+            buf_log_probs = (1-follow_ent_policy_tensor[:,0]) * log_probs + follow_ent_policy_tensor[:,0] * ent_log_probs
+
+            # actions to use in env
+            env_actions = (1-self.follow_ent_policy) * clipped_actions + self.follow_ent_policy * clipped_ent_actions
+
+            new_obs, rewards, dones, infos = env.step(env_actions)
 
             self.num_timesteps += env.num_envs
 
@@ -219,23 +263,32 @@ class OnPolicyAlgorithm(BaseAlgorithm):
                     with th.no_grad():
                         terminal_value = self.policy.predict_values(terminal_obs)[0]  # type: ignore[arg-type]
                     rewards[idx] += self.gamma * terminal_value
+                    # at terminal state, if ppo_mode == "dbltrn" need to reset to use non ent policy
+                    if self.ppo_mode == "dbltrn":
+                        self.follow_ent_policy[idx] = 0
 
             rollout_buffer.add(
                 self._last_obs,  # type: ignore[arg-type]
-                actions,
+                buf_actions,
                 rewards,
                 self._last_episode_starts,  # type: ignore[arg-type]
-                values,
-                log_probs,
+                buf_values,
+                buf_log_probs,
             )
             self._last_obs = new_obs  # type: ignore[assignment]
             self._last_episode_starts = dones
 
+        # end of collecting rollouts
         with th.no_grad():
             # Compute value for the last timestep
             values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+            ent_values = self.ent_policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+        
+        follow_ent_policy_tensor = th.from_numpy(self.follow_ent_policy)
+        follow_ent_policy_tensor = follow_ent_policy_tensor.to(self.device)
+        buf_values = (1-follow_ent_policy_tensor) * values + follow_ent_policy_tensor * ent_values
 
-        rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
+        rollout_buffer.compute_returns_and_advantage(last_values=buf_values, dones=dones)
 
         callback.update_locals(locals())
 

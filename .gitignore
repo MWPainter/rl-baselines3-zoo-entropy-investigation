@@ -2,6 +2,7 @@ setup_wandb_api_key.sh
 
 __pycache__/
 logs
+logs/*
 .pytest_cache/
 .coverage
 .coverage.*

@@ -204,10 +204,14 @@ def train() -> None:
                 "if you want to use Weights & Biases to track experiment, please install W&B via `pip install wandb`"
             ) from e
 
-        run_name = f"{args.env}__{args.algo}__{args.seed}__{int(time.time())}"
+        run_name = "{env}_{ppo_mode}".format(env=args.env,ppo_mode=args.hyperparams["ppo_mode"])
+        if "ent_coef" in args.hyperparams:
+            run_name += "_entcoef={e}".format(e=args.hyperparams["ent_coef"])
+        run_name += "_{s}_{t}".format(s=args.seed,t=int(time.time()))
         tags = [*args.wandb_tags, f"v{sb3.__version__}"]
         run = wandb.init(
             name=run_name,
+            id=run_name,
             project=args.wandb_project_name,
             entity=args.wandb_entity,
             tags=tags,
