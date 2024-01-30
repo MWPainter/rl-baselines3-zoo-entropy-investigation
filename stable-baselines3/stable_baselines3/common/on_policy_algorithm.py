@@ -228,12 +228,22 @@ class OnPolicyAlgorithm(BaseAlgorithm):
             # actions, values and log probs to be stored in rollout buf
             follow_ent_policy_tensor = th.from_numpy(self.follow_ent_policy)
             follow_ent_policy_tensor = follow_ent_policy_tensor.to(self.device)
-            buf_actions = (1-self.follow_ent_policy) * actions + self.follow_ent_policy * ent_actions
+            if clipped_actions.ndim == 1:
+                buf_actions = (1-self.follow_ent_policy[:,0]) * actions + self.follow_ent_policy[:,0] * ent_actions
+            elif clipped_actions.ndim == 2:
+                buf_actions = (1-self.follow_ent_policy) * actions + self.follow_ent_policy * ent_actions
+            else:
+                raise "Something wrong with action shaped in on_policy_algorithm.py"
             buf_values = (1-follow_ent_policy_tensor) * values + follow_ent_policy_tensor * ent_values
             buf_log_probs = (1-follow_ent_policy_tensor[:,0]) * log_probs + follow_ent_policy_tensor[:,0] * ent_log_probs
 
             # actions to use in env
-            env_actions = (1-self.follow_ent_policy) * clipped_actions + self.follow_ent_policy * clipped_ent_actions
+            if clipped_actions.ndim == 1:
+                env_actions = (1-self.follow_ent_policy[:,0]) * clipped_actions + self.follow_ent_policy[:,0] * clipped_ent_actions
+            elif clipped_actions.ndim == 2:
+                env_actions = (1-self.follow_ent_policy) * clipped_actions + self.follow_ent_policy * clipped_ent_actions
+            else:
+                raise "Something wrong with action shaped in on_policy_algorithm.py"
 
             new_obs, rewards, dones, infos = env.step(env_actions)
 
