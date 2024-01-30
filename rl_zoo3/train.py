@@ -208,6 +208,7 @@ def train() -> None:
         if "ent_coef" in args.hyperparams:
             run_name += "_entcoef={e}".format(e=args.hyperparams["ent_coef"])
         run_name += "_{s}_{t}".format(s=args.seed,t=int(time.time()))
+        run_name = run_name.replace("/","_")
         tags = [*args.wandb_tags, f"v{sb3.__version__}"]
         run = wandb.init(
             name=run_name,
