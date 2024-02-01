@@ -240,6 +240,8 @@ class PPO(OnPolicyAlgorithm):
                     # clipped surrogate loss
                     policy_loss_1 = advantages * ratio
                     policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                    if self.ppo_mode in ["dbl", "dbltrn"]:
+                        policy_loss_2 = advantages * th.clamp(ratio, 0.0, 1 + clip_range)
                     policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
                     # Logging

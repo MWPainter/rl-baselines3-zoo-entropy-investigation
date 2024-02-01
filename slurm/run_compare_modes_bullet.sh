@@ -8,10 +8,10 @@ mkdir -p $OUT_DIR
 
 # in the bullet envs, all of the optimal ent_coef's are 0.0, so try out the dbl methods with ent=5e-4
 
-PPO_MODE="\"noent\"" 
-OUT_FILE=${OUT_DIR}/noent.out
-JOB_NAME=blt-${PPO_MODE}
-sbatch --job-name=${JOB_NAME} --output=${OUT_FILE} --export=EXPR_ID=${EXPR_ID},ENV_IDS=${ENV_IDS},PPO_MODE=${PPO_MODE} train_agent_many_env.slurm
+# PPO_MODE="\"noent\"" 
+# OUT_FILE=${OUT_DIR}/noent.out
+# JOB_NAME=blt-${PPO_MODE}
+# sbatch --job-name=${JOB_NAME} --output=${OUT_FILE} --export=EXPR_ID=${EXPR_ID},ENV_IDS=${ENV_IDS},PPO_MODE=${PPO_MODE} train_agent_many_env.slurm
 
 PPO_MODE="\"opt\"" 
 OUT_FILE=${OUT_DIR}/opt.out
