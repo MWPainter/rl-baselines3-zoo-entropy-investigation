@@ -1,4 +1,4 @@
-EXPR_ID="compare_ppo_modes"
+EXPR_ID="compare_ppo_modes_v2"
 ENV_ID="CarRacing-v2"
 NTIMESTEPS=4000000
 

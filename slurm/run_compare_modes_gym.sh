@@ -1,4 +1,4 @@
-EXPR_ID="compare_ppo_modes"
+EXPR_ID="compare_ppo_modes_v2"
 ENV_IDS_ARR=("Pendulum-v1" "CartPole-v1" "MountainCar-v0" "MountainCarContinuous-v0" "Acrobot-v1")
 #https://stackoverflow.com/questions/1527049/how-can-i-join-elements-of-a-bash-array-into-a-delimited-string
 ENV_IDS=$(IFS=';' ; echo "${ENV_IDS_ARR[*]}")
