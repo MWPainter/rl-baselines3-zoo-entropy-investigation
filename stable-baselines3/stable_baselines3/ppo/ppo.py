@@ -247,6 +247,8 @@ class PPO(OnPolicyAlgorithm):
                     # Logging
                     pg_losses[i].append(policy_loss.item())
                     clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                    if self.ppo_mode in ["dbl", "dbltrn"]:
+                        clip_fraction = th.mean((ratio > 1 + clip_range).float()).item()
                     clip_fractions[i].append(clip_fraction)
 
                     if self.clip_range_vf is None:
