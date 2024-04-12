@@ -15,6 +15,19 @@ from stable_baselines3.common.utils import explained_variance, get_schedule_fn
 SelfPPO = TypeVar("SelfPPO", bound="PPO")
 
 
+def compute_model_norm(params):
+    model_norm = 0.0
+    for param in params:
+        model_norm += th.norm(param.data) ** 2
+    return float(th.sqrt(model_norm))
+
+def compute_model_grad_norm(params):
+    grad_norm = 0.0
+    for param in params:
+        grad_norm += th.norm(param.grad) ** 2
+    return float(th.sqrt(grad_norm))
+
+
 class PPO(OnPolicyAlgorithm):
     """
     Proximal Policy Optimization algorithm (PPO) (clip version)
@@ -139,6 +152,9 @@ class PPO(OnPolicyAlgorithm):
             switch_to_ent_prob=switch_to_ent_prob,
         )
 
+        # Keep track of number of gradient steps
+        self.num_gradient_steps = 0
+
         # Sanity check, otherwise it will lead to noisy gradient and NaN
         # because of the advantage normalization
         if normalize_advantage:
@@ -240,15 +256,15 @@ class PPO(OnPolicyAlgorithm):
                     # clipped surrogate loss
                     policy_loss_1 = advantages * ratio
                     policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                    if self.ppo_mode in ["dbl", "dbltrn"]:
-                        policy_loss_2 = advantages * th.clamp(ratio, 0.0, 1 + clip_range)
+                    # if self.ppo_mode in ["dbl", "dbltrn"]:
+                    #     policy_loss_2 = advantages * th.clamp(ratio, 0.0, 1 + clip_range)
                     policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
                     # Logging
                     pg_losses[i].append(policy_loss.item())
                     clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                    if self.ppo_mode in ["dbl", "dbltrn"]:
-                        clip_fraction = th.mean((ratio > 1 + clip_range).float()).item()
+                    # if self.ppo_mode in ["dbl", "dbltrn"]:
+                    #     clip_fraction = th.mean((ratio > 1 + clip_range).float()).item()
                     clip_fractions[i].append(clip_fraction)
 
                     if self.clip_range_vf is None:
@@ -295,9 +311,34 @@ class PPO(OnPolicyAlgorithm):
                     # Optimization step
                     p.optimizer.zero_grad()
                     loss[i].backward()
+                    # Log grad norms pre clipping
+                    pre_clip_actor_grad_norm = compute_model_grad_norm(p.mlp_extractor.policy_net.parameters())
+                    pre_clip_critic_grad_norm = compute_model_grad_norm(p.mlp_extractor.value_net.parameters())
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(p.parameters(), self.max_grad_norm)
                     p.optimizer.step()
+
+                    # Add debugging logs 
+                    prefix = ""
+                    if i == 1:
+                        prefix = "ent_net_"
+                    self.logger.record("debug/{prfx}actor_model_norm".format(prfx=prefix), compute_model_norm(p.mlp_extractor.policy_net.parameters()))
+                    self.logger.record("debug/{prfx}actor_grad_norm".format(prfx=prefix), compute_model_grad_norm(p.mlp_extractor.policy_net.parameters()))
+                    self.logger.record("debug/{prfx}actor_pre_clip_grad_norm".format(prfx=prefix), pre_clip_actor_grad_norm)
+                    self.logger.record("debug/{prfx}critic_model_norm".format(prfx=prefix), compute_model_norm(p.mlp_extractor.value_net.parameters()))
+                    self.logger.record("debug/{prfx}critic_grad_norm".format(prfx=prefix), compute_model_grad_norm(p.mlp_extractor.value_net.parameters()))
+                    self.logger.record("debug/{prfx}critic_pre_clip_grad_norm".format(prfx=prefix), pre_clip_critic_grad_norm)
+                    self.logger.record("debug/{prfx}lr".format(prfx=prefix), self.lr_schedule(self._current_progress_remaining))
+                    self.logger.record("debug/{prfx}policy_loss".format(prfx=prefix), float(policy_loss))
+                    self.logger.record("debug/{prfx}value_loss".format(prfx=prefix), float(value_loss))
+                    self.logger.record("debug/{prfx}entropy_loss".format(prfx=prefix), float(entropy_loss))
+                    self.logger.record("debug/{prfx}total_loss".format(prfx=prefix), float(loss[i]))
+                    self.logger.record("debug/{prfx}mean_target_value".format(prfx=prefix), float(th.mean(values)))
+                    self.logger.record("debug/{prfx}mean_predict_value".format(prfx=prefix), float(th.mean(values_pred)))
+
+                    # Dump, regularly
+                    self.logger.dump(step=self.num_gradient_steps)
+                    self.num_gradient_steps += 1
 
             self._n_updates += 1
             if not continue_training:
@@ -317,14 +358,14 @@ class PPO(OnPolicyAlgorithm):
             self.logger.record("train/std", th.exp(self.policy.log_std).mean().item())
 
         if self.ppo_mode in ["dbl","dbltrn"]:
-            self.logger.record("train/ent_entropy_loss", np.mean(entropy_losses[1]))
-            self.logger.record("train/ent_policy_gradient_loss", np.mean(pg_losses[1]))
-            self.logger.record("train/ent_value_loss", np.mean(value_losses[1]))
-            self.logger.record("train/ent_approx_kl", np.mean(approx_kl_divs[1]))
-            self.logger.record("train/ent_clip_fraction", np.mean(clip_fractions[1]))
-            self.logger.record("train/ent_loss", loss[1].item())
+            self.logger.record("train/ent_net_entropy_loss", np.mean(entropy_losses[1]))
+            self.logger.record("train/ent_net_policy_gradient_loss", np.mean(pg_losses[1]))
+            self.logger.record("train/ent_net_value_loss", np.mean(value_losses[1]))
+            self.logger.record("train/ent_net_approx_kl", np.mean(approx_kl_divs[1]))
+            self.logger.record("train/ent_net_clip_fraction", np.mean(clip_fractions[1]))
+            self.logger.record("train/ent_net_loss", loss[1].item())
             if hasattr(self.ent_policy, "log_std"):
-                self.logger.record("train/ent_std", th.exp(self.ent_policy.log_std).mean().item())
+                self.logger.record("train/ent_net_std", th.exp(self.ent_policy.log_std).mean().item())
 
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         self.logger.record("train/clip_range", clip_range)

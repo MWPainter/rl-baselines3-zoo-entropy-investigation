@@ -1,6 +1,6 @@
 EXPR_ID="tst_base"
 ENV_ID="Ant-v4"
-PPO_MODE="\"opt\""  # in {noent, opt, dbl, dbltrn}
+PPO_MODE="\"dbltrn\""  # in {noent, opt, dbl, dbltrn}
 
 OUT_DIR=slurm_out
 mkdir -p $OUT_DIR

@@ -4,7 +4,7 @@
 #SBATCH --nodes=1
 
 # set max wallclock time
-#SBATCH --time=5-00:00:00
+#SBATCH --time=2-00:00:00
 
 # set number of GPUs
 #SBATCH --gres=gpu:1
