@@ -4,13 +4,13 @@
 #SBATCH --nodes=1
 
 # set max wallclock time
-#SBATCH --time=2-00:00:00
+#SBATCH --time=6-00:00:00
 
 # set number of GPUs
 #SBATCH --gres=gpu:1
 
 # mail alert at start, end and abortion of execution
-#SBATCH --mail-type=ALL
+#SBATCH --mail-type=END,FAIL
 
 # send mail to this address
 #SBATCH --mail-user=mpainter@robots.ox.ac.uk

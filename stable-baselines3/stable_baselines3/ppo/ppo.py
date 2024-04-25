@@ -15,6 +15,11 @@ from stable_baselines3.common.utils import explained_variance, get_schedule_fn
 SelfPPO = TypeVar("SelfPPO", bound="PPO")
 
 
+
+DBG_LOG_FREQ = 50
+FLG_ALLOW_ZERO_CLIP_LOSS = False
+
+
 def compute_model_norm(params):
     model_norm = 0.0
     for param in params:
@@ -187,6 +192,24 @@ class PPO(OnPolicyAlgorithm):
         self.normalize_advantage = normalize_advantage
         self.target_kl = target_kl
 
+        # vars to log debugging info
+        # was logging this info every policy update
+        # but syncing data to wandb took way too long, so logging avg every k policy updates
+        self.grad_steps_since_last_debug_log = 0     
+        self.actor_model_norm_avg = [0.0, 0.0]
+        self.actor_grad_norm_avg = [0.0, 0.0]
+        self.actor_pre_clip_grad_norm_avg = [0.0, 0.0]
+        self.critic_model_norm_avg = [0.0, 0.0]
+        self.critic_grad_norm_avg = [0.0, 0.0]
+        self.critic_pre_clip_grad_norm_avg = [0.0, 0.0]
+        self.lr_avg = [0.0, 0.0]
+        self.policy_loss_avg = [0.0, 0.0]
+        self.value_loss_avg = [0.0, 0.0]
+        self.entropy_loss_avg = [0.0, 0.0]
+        self.total_loss_avg = [0.0, 0.0]
+        self.mean_target_value_avg = [0.0, 0.0]
+        self.mean_predict_value_avg = [0.0, 0.0]
+
         if _init_setup_model:
             self._setup_model()
 
@@ -217,9 +240,12 @@ class PPO(OnPolicyAlgorithm):
         if self.clip_range_vf is not None:
             clip_range_vf = self.clip_range_vf(self._current_progress_remaining)  # type: ignore[operator]
 
-        entropy_losses = {0:[],1:[]}
-        pg_losses, value_losses = {0:[],1:[]}, {0:[],1:[]}
-        clip_fractions = {0:[],1:[]}
+        # entropy_losses = {0:[],1:[]}
+        # pg_losses, value_losses = {0:[],1:[]}, {0:[],1:[]}
+        # clip_fractions = {0:[],1:[]}
+        entropy_losses = [[],[]]
+        pg_losses, value_losses = [[],[]], [[],[]]
+        clip_fractions = [[],[]]
         loss = [None, None]
 
         continue_training = True
@@ -256,8 +282,8 @@ class PPO(OnPolicyAlgorithm):
                     # clipped surrogate loss
                     policy_loss_1 = advantages * ratio
                     policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                    # if self.ppo_mode in ["dbl", "dbltrn"]:
-                    #     policy_loss_2 = advantages * th.clamp(ratio, 0.0, 1 + clip_range)
+                    if FLG_ALLOW_ZERO_CLIP_LOSS and self.ppo_mode in ["dbl", "dbltrn"]:
+                        policy_loss_2 = advantages * th.clamp(ratio, 0.0, 1 + clip_range)
                     policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
                     # Logging
@@ -311,34 +337,85 @@ class PPO(OnPolicyAlgorithm):
                     # Optimization step
                     p.optimizer.zero_grad()
                     loss[i].backward()
-                    # Log grad norms pre clipping
-                    pre_clip_actor_grad_norm = compute_model_grad_norm(p.mlp_extractor.policy_net.parameters())
-                    pre_clip_critic_grad_norm = compute_model_grad_norm(p.mlp_extractor.value_net.parameters())
+                    # Grad norms pre clipping
+                    actor_pre_clip_grad_norm = compute_model_grad_norm(p.mlp_extractor.policy_net.parameters())
+                    critic_pre_clip_grad_norm = compute_model_grad_norm(p.mlp_extractor.value_net.parameters())
                     # Clip grad norm
                     th.nn.utils.clip_grad_norm_(p.parameters(), self.max_grad_norm)
                     p.optimizer.step()
 
-                    # Add debugging logs 
-                    prefix = ""
-                    if i == 1:
-                        prefix = "ent_net_"
-                    self.logger.record("debug/{prfx}actor_model_norm".format(prfx=prefix), compute_model_norm(p.mlp_extractor.policy_net.parameters()))
-                    self.logger.record("debug/{prfx}actor_grad_norm".format(prfx=prefix), compute_model_grad_norm(p.mlp_extractor.policy_net.parameters()))
-                    self.logger.record("debug/{prfx}actor_pre_clip_grad_norm".format(prfx=prefix), pre_clip_actor_grad_norm)
-                    self.logger.record("debug/{prfx}critic_model_norm".format(prfx=prefix), compute_model_norm(p.mlp_extractor.value_net.parameters()))
-                    self.logger.record("debug/{prfx}critic_grad_norm".format(prfx=prefix), compute_model_grad_norm(p.mlp_extractor.value_net.parameters()))
-                    self.logger.record("debug/{prfx}critic_pre_clip_grad_norm".format(prfx=prefix), pre_clip_critic_grad_norm)
-                    self.logger.record("debug/{prfx}lr".format(prfx=prefix), self.lr_schedule(self._current_progress_remaining))
-                    self.logger.record("debug/{prfx}policy_loss".format(prfx=prefix), float(policy_loss))
-                    self.logger.record("debug/{prfx}value_loss".format(prfx=prefix), float(value_loss))
-                    self.logger.record("debug/{prfx}entropy_loss".format(prfx=prefix), float(entropy_loss))
-                    self.logger.record("debug/{prfx}total_loss".format(prfx=prefix), float(loss[i]))
-                    self.logger.record("debug/{prfx}mean_target_value".format(prfx=prefix), float(th.mean(values)))
-                    self.logger.record("debug/{prfx}mean_predict_value".format(prfx=prefix), float(th.mean(values_pred)))
-
-                    # Dump, regularly
-                    self.logger.dump(step=self.num_gradient_steps)
+                    # Update debug wandb logging variables
                     self.num_gradient_steps += 1
+                    self.grad_steps_since_last_debug_log += 1
+                    r = (self.grad_steps_since_last_debug_log - 1) / self.grad_steps_since_last_debug_log
+                    self.actor_model_norm_avg[i] *= r
+                    self.actor_model_norm_avg[i] += compute_model_norm(p.mlp_extractor.policy_net.parameters()) / self.grad_steps_since_last_debug_log
+                    self.actor_grad_norm_avg[i] *= r
+                    self.actor_grad_norm_avg[i] += compute_model_grad_norm(p.mlp_extractor.policy_net.parameters()) / self.grad_steps_since_last_debug_log
+                    self.actor_pre_clip_grad_norm_avg[i] *= r
+                    self.actor_pre_clip_grad_norm_avg[i] += actor_pre_clip_grad_norm / self.grad_steps_since_last_debug_log
+                    self.critic_model_norm_avg[i] *= r
+                    self.critic_model_norm_avg[i] += compute_model_norm(p.mlp_extractor.value_net.parameters()) / self.grad_steps_since_last_debug_log
+                    self.critic_grad_norm_avg[i] *= r
+                    self.critic_grad_norm_avg[i] += compute_model_grad_norm(p.mlp_extractor.value_net.parameters()) / self.grad_steps_since_last_debug_log
+                    self.critic_pre_clip_grad_norm_avg[i] *= r
+                    self.critic_pre_clip_grad_norm_avg[i] += critic_pre_clip_grad_norm / self.grad_steps_since_last_debug_log
+                    self.lr_avg[i] *= r
+                    self.lr_avg[i] += self.lr_schedule(self._current_progress_remaining) / self.grad_steps_since_last_debug_log
+                    self.policy_loss_avg[i] *= r
+                    self.policy_loss_avg[i] += float(policy_loss) / self.grad_steps_since_last_debug_log
+                    self.value_loss_avg[i] *= r
+                    self.value_loss_avg[i] += float(value_loss) / self.grad_steps_since_last_debug_log
+                    self.entropy_loss_avg[i] *= r
+                    self.entropy_loss_avg[i] += float(entropy_loss) / self.grad_steps_since_last_debug_log
+                    self.total_loss_avg[i] *= r
+                    self.total_loss_avg[i] += float(loss[i]) / self.grad_steps_since_last_debug_log
+                    self.mean_target_value_avg[i] *= r
+                    self.mean_target_value_avg[i] += float(th.mean(values)) / self.grad_steps_since_last_debug_log
+                    self.mean_predict_value_avg[i] *= r
+                    self.mean_predict_value_avg[i] += float(th.mean(values_pred)) / self.grad_steps_since_last_debug_log
+
+                    # if enough policy updates have occurred, dump the debug logs
+                    if self.grad_steps_since_last_debug_log >= DBG_LOG_FREQ:
+                        # Dump
+                        prefix = ""
+                        if i == 1:
+                            prefix = "ent_net_"
+                        self.logger.record("debug/{prfx}actor_model_norm".format(prfx=prefix), self.actor_model_norm_avg[i])
+                        self.logger.record("debug/{prfx}actor_grad_norm".format(prfx=prefix), self.actor_grad_norm_avg[i])
+                        self.logger.record("debug/{prfx}actor_pre_clip_grad_norm".format(prfx=prefix), self.actor_pre_clip_grad_norm_avg[i])
+                        self.logger.record("debug/{prfx}critic_model_norm".format(prfx=prefix), self.critic_model_norm_avg[i])
+                        self.logger.record("debug/{prfx}critic_grad_norm".format(prfx=prefix), self.critic_grad_norm_avg[i])
+                        self.logger.record("debug/{prfx}critic_pre_clip_grad_norm".format(prfx=prefix), self.critic_pre_clip_grad_norm_avg[i])
+                        self.logger.record("debug/{prfx}lr".format(prfx=prefix), self.lr_avg[i])
+                        self.logger.record("debug/{prfx}policy_loss".format(prfx=prefix), self.policy_loss_avg[i])
+                        self.logger.record("debug/{prfx}value_loss".format(prfx=prefix), self.value_loss_avg[i])
+                        self.logger.record("debug/{prfx}entropy_loss".format(prfx=prefix), self.entropy_loss_avg[i])
+                        self.logger.record("debug/{prfx}total_loss".format(prfx=prefix), self.total_loss_avg[i])
+                        self.logger.record("debug/{prfx}mean_target_value".format(prfx=prefix), self.mean_target_value_avg[i])
+                        self.logger.record("debug/{prfx}mean_predict_value".format(prfx=prefix), self.mean_predict_value_avg[i])
+
+                        self.logger.dump(step=self.num_gradient_steps)
+
+                        # Reset avg stats
+                        self.actor_model_norm_avg[i] = 0.0
+                        self.actor_grad_norm_avg[i] = 0.0
+                        self.actor_pre_clip_grad_norm_avg[i] = 0.0
+                        self.critic_model_norm_avg[i] = 0.0
+                        self.critic_grad_norm_avg[i] = 0.0
+                        self.critic_pre_clip_grad_norm_avg[i] = 0.0
+                        self.lr_avg[i] = 0.0
+                        self.policy_loss_avg[i] = 0.0
+                        self.value_loss_avg[i] = 0.0
+                        self.entropy_loss_avg[i] = 0.0
+                        self.total_loss_avg[i] = 0.0
+                        self.mean_target_value_avg[i] = 0.0
+                        self.mean_predict_value_avg[i] = 0.0
+
+                        # Only reset the grad steps debug logging counter on i=1, so ent_net still gets debugging info
+                        if i == 1:
+                            self.grad_steps_since_last_debug_log = 0
+
 
             self._n_updates += 1
             if not continue_training:
