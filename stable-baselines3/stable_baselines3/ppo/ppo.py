@@ -16,16 +16,22 @@ SelfPPO = TypeVar("SelfPPO", bound="PPO")
 
 
 
-DBG_LOG_FREQ = 50
+# Flags for code changes
 FLG_ALLOW_ZERO_CLIP_LOSS = False
 
+# how frequently to log, try to make it so that each graph has approx 10k datapoints
+def DBG_LOG_FREQ(n_timesteps, n_epochs, batch_size):
+    total_grad_updates = n_timesteps * n_epochs // batch_size
+    return total_grad_updates // 10000
 
+# helper to compute model norm
 def compute_model_norm(params):
     model_norm = 0.0
     for param in params:
         model_norm += th.norm(param.data) ** 2
     return float(th.sqrt(model_norm))
 
+# helper to compute grad norm
 def compute_model_grad_norm(params):
     grad_norm = 0.0
     for param in params:
@@ -376,7 +382,7 @@ class PPO(OnPolicyAlgorithm):
                     self.mean_predict_value_avg[i] += float(th.mean(values_pred)) / self.grad_steps_since_last_debug_log
 
                     # if enough policy updates have occurred, dump the debug logs
-                    if self.grad_steps_since_last_debug_log >= DBG_LOG_FREQ:
+                    if self.grad_steps_since_last_debug_log >= DBG_LOG_FREQ(self._total_timesteps,self.n_epochs,self.batch_size):
                         # Dump
                         prefix = ""
                         if i == 1:
