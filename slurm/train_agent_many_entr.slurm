@@ -18,6 +18,9 @@
 # Use a small partition
 #SBATCH --partition=small
 
+# Some of the jade nodes are a bit buggy right now
+#SBATCH --exclude=dgk713
+
 
 
 HOME_DIR="/jmain02/home/J2AD008/wga37/mmp10-wga37"
